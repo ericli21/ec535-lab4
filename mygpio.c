@@ -44,10 +44,26 @@ static int proc_gpio_write(struct file *file, const char __user *buf,
                            unsigned long count, void *data)
 {
 
-	//extra functionality: writing f(0-9) changes timer frequency to n/4
+	//extra functionality: writing f(1-9) changes timer frequency to n/4
 	//extra functionality: writing v(hex) sets count value to given hex value
 
+	//add checks for null input after an f or a v 
+
+	//if buffer[0] == f
+		//number = atoi(buffer[1])
+		//if number < 10 && number >= 1
+			//frequency = number
+
+	//if buffer[0] == v
+		//get next char
+		//A is 65, F is 70 in ASCII
+		//if(buffer[1] >= '0' && buffer[1] <= '9' && (buffer[2] is NULL or a newline))
+			//counter = atoi(buffer[1])
+		//else if(buffer[1] >= 'A' && buffer[1] <= 'F' && (buffer[2] is NULL or a newline))
+			//counter = atoi(buffer[1] - 55)
+
 	//We probably don't need anything beyond this point
+
 
 	char *cur, lbuf[count + 1];
 	gpio_summary_type *summary = data;
@@ -148,8 +164,7 @@ static int proc_gpio_read(char *page, char **start, off_t off,
 
 	//extra functionality: reading from /dev/mygpio returns:
 	//counter value, counter frequency, counter direction, counter state
-
-	//could probably do this by using a proc page as in Lab 3
+	//sprintf(page,"%d\t%.3f\t%d\t%d\n", counter, frequency, direction, state);
 
 
 	char *p = page;
@@ -260,10 +275,13 @@ static int __init gpio_init(void)
   int i;
 
 
-  //set up LED pins here, set up button interrupts here
+  //initialize LED pins here
+
+  //set up button interrupts here, interrupt handler functions below
 
   //may also need to initialize a timer here. 1 second continuous unless modified by a write
-  //could we do all button handling within timer handler? i.e. when the timer goes off, that's when we check the button levels
+
+  //Probably don't need anything beyond this point, all proc setup
 
 
   proc_gpio_parent = NULL;
@@ -302,6 +320,10 @@ static int __init gpio_init(void)
 
 static void gpio_exit(void)
 {
+	//delete timer if there is one
+	//Probably don't need the rest of this because it's all proc cleanup
+
+
 	int i;
 
 	remove_proc_entry("GAFR", proc_gpio_parent);
@@ -326,15 +348,17 @@ static void gpio_exit(void)
 
 static void LED_helper(int num){
 
+	//use bitwise AND to check if the current bit should light the LED
+
 	//LSB LED 0
 	if(num & 1){
 		//set LED 0 to high
-		//pxa_gpio_set_value(GPIO_PIN_0, 1);
+		//pxa_gpio_set_value(LED_PIN_0, 1);
 		printk(KERN_ALERT, "LED 0 set high\n");
 	}
 	else{
 		//set LED 0 to low
-		//pxa_gpio_set_value(GPIO_PIN_0, 0);
+		//pxa_gpio_set_value(LED_PIN_0, 0);
 		printk(KERN_ALERT, "LED 0 set low\n");
 	}
 
@@ -344,12 +368,12 @@ static void LED_helper(int num){
 	//LED 1
 	if(num & 1){
 		//set LED 1 to high
-		//pxa_gpio_set_value(GPIO_PIN_1, 1);
+		//pxa_gpio_set_value(LED_PIN_1, 1);
 		printk(KERN_ALERT, "LED 1 set high\n");
 	}
 	else{
 		//set LED 1 to low
-		//pxa_gpio_set_value(GPIO_PIN_1, 0);
+		//pxa_gpio_set_value(LED_PIN_1, 0);
 		printk(KERN_ALERT, "LED 1 set low\n");
 	}
 
@@ -359,12 +383,12 @@ static void LED_helper(int num){
 	//LED 2
 	if(num & 1){
 		//set LED 2 to high
-		//pxa_gpio_set_value(GPIO_PIN_2, 1);
+		//pxa_gpio_set_value(LED_PIN_2, 1);
 		printk(KERN_ALERT, "LED 2 set high\n");
 	}
 	else{
 		//set LED 2 to low
-		//pxa_gpio_set_value(GPIO_PIN_2, 0);
+		//pxa_gpio_set_value(LED_PIN_2, 0);
 		printk(KERN_ALERT, "LED 2 set low\n");
 	}
 
@@ -374,12 +398,12 @@ static void LED_helper(int num){
 	//MSB LED 3
 	if(num & 1){
 		//set LED 3 to high
-		//pxa_gpio_set_value(GPIO_PIN_3, 1);
+		//pxa_gpio_set_value(LED_PIN_3, 1);
 		printk(KERN_ALERT, "LED 3 set high\n");
 	}
 	else{
 		//set LED 3 to low
-		//pxa_gpio_set_value(GPIO_PIN_3, 0);
+		//pxa_gpio_set_value(LED_PIN_3, 0);
 		printk(KERN_ALERT, "LED 3 set low\n");
 	}
 
@@ -387,19 +411,37 @@ static void LED_helper(int num){
 
 static irq_handler_t button0_interrupt(unsigned int irq, void *dev_id, struct pt_regs *regs){
 	//button 0: released holds value, pressed counts by 1
+	//state = pxa_gpio_get_value(BUTTON_PIN_0);
 	
 
 }
 
 static irq_handler_t button0_interrupt(unsigned int irq, void *dev_id, struct pt_regs *regs){
 	//button 1: released sets count direction to down, pressed sets count direction to up
+	//direction = pxa_gpio_get_value(BUTTON_PIN_1);
 
 }
 
 static void timer_handler(unsigned long data) {
-	//count up or down based on direction
-	//call LED helper
+
+	//check if we need to update counter value
+	if(state){
+
+		//check counter direction
+		if(direction){
+			counter++;
+		}
+		else{
+			counter--;
+		}
+
+	}
+
+	//Update LEDs
+	LED_helper(counter);
+
 	//modify timer to frequency * seconds
+	//mod_timer(my_timer, jiffies + (frequency * HZ));
  
 }
 
