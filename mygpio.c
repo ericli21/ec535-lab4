@@ -8,16 +8,24 @@
 #include <asm/arch/pxa-regs.h>
 #include <asm/uaccess.h>
 #include <linux/interrupt.h> //IRQ here
+#include <linux/jiffies.h>
+#include <asm/arch/gpio.h>
+#include <linux/timer.h> //need for kernel timer
 
 static void LED_helper(int num);
+static irq_handler_t button0_interrupt(unsigned int irq, void *dev_id, struct pt_regs *regs);
+static irq_handler_t button1_interrupt(unsigned int irq, void *dev_id, struct pt_regs *regs);
+static void timer_handler(unsigned long data);
 
 //initial count is 1, direction is 0 (down), state is 0 (hold value)
-int current_count = 1;
-int direction = 0;
-int state = 0;
+static int counter = 1;
+static int direction = 1;
+static int state = 0;
 
 //initial timer frequency is 1HZ (1 second), can be fractional
-double frequency = 1;
+static int frequency = 1;
+static struct timer_list * my_timer_ptr;
+static struct timer_list my_timer;
 
 // define LED and button pins here
 #define LED_PIN_0 28
@@ -27,7 +35,6 @@ double frequency = 1;
 
 #define BUTTON_PIN_0 17
 #define BUTTON_PIN_1 101
-
 
 static struct proc_dir_entry *proc_gpio_parent;
 static struct proc_dir_entry *proc_gpios[PXA_LAST_GPIO + 1];
@@ -49,21 +56,23 @@ static int proc_gpio_write(struct file *file, const char __user *buf,
 
 	//add checks for null input after an f or a v 
 
+	//if count > 1
+
 	//if buffer[0] == f
 		//number = atoi(buffer[1])
 		//if number < 10 && number >= 1
-			//frequency = number
+			//frequency = number/4.0;
 
 	//if buffer[0] == v
 		//get next char
 		//A is 65, F is 70 in ASCII
 		//if(buffer[1] >= '0' && buffer[1] <= '9' && (buffer[2] is NULL or a newline))
-			//counter = atoi(buffer[1])
+			//counter = atoi(buffer[1]);
 		//else if(buffer[1] >= 'A' && buffer[1] <= 'F' && (buffer[2] is NULL or a newline))
-			//counter = atoi(buffer[1] - 55)
+			//counter = atoi(buffer[1] - 55);
 
 	//We probably don't need anything beyond this point
-
+/*
 
 	char *cur, lbuf[count + 1];
 	gpio_summary_type *summary = data;
@@ -150,7 +159,7 @@ static int proc_gpio_write(struct file *file, const char __user *buf,
 				setclear ? "set" : "clear",
 				summary->name);
 #endif
-
+*/
 	return count;
 
 parse_error:
@@ -164,9 +173,11 @@ static int proc_gpio_read(char *page, char **start, off_t off,
 
 	//extra functionality: reading from /dev/mygpio returns:
 	//counter value, counter frequency, counter direction, counter state
-	//sprintf(page,"%d\t%.3f\t%d\t%d\n", counter, frequency, direction, state);
+	//int len = sprintf(page,"%d\t%.3f\t%d\t%d\n", counter, frequency, direction, state);
 
+	int len;
 
+	/*
 	char *p = page;
 	gpio_summary_type *summary = data;
 	int len, i, af;
@@ -186,10 +197,10 @@ static int proc_gpio_read(char *page, char **start, off_t off,
 
 	*eof = (len <= count) ? 1 : 0;
 	*start = page + off;
-
+	*/
 	return len;
 }
-
+/*
 //We probably don't need these other read functions
 
 #ifdef CONFIG_PXA25x
@@ -269,21 +280,67 @@ static int proc_gplr_read(char *page, char **start, off_t off,
 
 	return len;
 }
-
+*/
 static int __init gpio_init(void)
 {
-  int i;
+	int i;
+
+  	//initialize LED pins here, set as output
+	int led0 = pxa_gpio_mode(LED_PIN_0 | GPIO_OUT);
+	int led1 = pxa_gpio_mode(LED_PIN_1 | GPIO_OUT);
+	int led2 = pxa_gpio_mode(LED_PIN_2 | GPIO_OUT);
+	int led3 = pxa_gpio_mode(LED_PIN_3 | GPIO_OUT);
+
+	pxa_gpio_set_value(LED_PIN_0, 0);
+	pxa_gpio_set_value(LED_PIN_1, 0);
+	pxa_gpio_set_value(LED_PIN_2, 0);
+	pxa_gpio_set_value(LED_PIN_3, 0);
+
+	//set up buttons as input
+	pxa_gpio_mode(BUTTON_PIN_0 | GPIO_IN);
+	pxa_gpio_mode(BUTTON_PIN_1 | GPIO_IN);
+
+	int irq0 = IRQ_GPIO(BUTTON_PIN_0);
+	int irq1 = IRQ_GPIO(BUTTON_PIN_1);
 
 
-  //initialize LED pins here
+	//Set up interrupt
+	if (request_irq(irq0, &button0_interrupt, SA_INTERRUPT | SA_TRIGGER_RISING | SA_TRIGGER_FALLING,
+				"mygpio", NULL) != 0 ) {
+                printk ( "irq not acquired \n" );
+                return -1;
+        }else{
+                printk ( "irq %d acquired successfully \n", irq0 );
+	}
 
-  //set up button interrupts here, interrupt handler functions below
+	if (request_irq(irq1, &button1_interrupt, SA_INTERRUPT | SA_TRIGGER_RISING | SA_TRIGGER_FALLING,
+				"mygpio", NULL) != 0 ) {
+                printk ( "irq not acquired \n" );
+                return -1;
+        }else{
+                printk ( "irq %d acquired successfully \n", irq1 );
+	}
 
-  //may also need to initialize a timer here. 1 second continuous unless modified by a write
+  	//Set up timer
+	my_timer_ptr = &my_timer;
+	//printk(KERN_ALERT "Made it\n");
+	init_timer(my_timer_ptr);
+	//printk(KERN_ALERT "Made it\n");
+	(*my_timer_ptr).expires = jiffies + msecs_to_jiffies(frequency * 1000);
+	//printk(KERN_ALERT "Made it\n");
+	(*my_timer_ptr).function = timer_handler;
 
-  //Probably don't need anything beyond this point, all proc setup
+	add_timer(my_timer_ptr);
 
 
+	LED_helper(counter);
+
+
+  	//Probably don't need anything beyond this point, all proc setup
+
+
+
+/*
   proc_gpio_parent = NULL;
   for (proc_gpio_parent = proc_root.subdir; proc_gpio_parent; proc_gpio_parent = proc_gpio_parent->next) {
     if (( proc_gpio_parent->namelen == 4 ) && ( memcmp(proc_gpio_parent->name, "gpio", 4 ) == 0 ))
@@ -314,7 +371,7 @@ static int __init gpio_init(void)
 	create_proc_read_entry("GAFR", 0444, proc_gpio_parent, proc_gafr_read, NULL);
 	create_proc_read_entry("GPDR", 0444, proc_gpio_parent, proc_gpdr_read, NULL);
 	create_proc_read_entry("GPLR", 0444, proc_gpio_parent, proc_gplr_read, NULL);
-
+*/
 	return 0;
 }
 
@@ -325,7 +382,10 @@ static void gpio_exit(void)
 
 
 	int i;
-
+	del_timer(my_timer_ptr);
+	free_irq(IRQ_GPIO(BUTTON_PIN_0), NULL);
+	free_irq(IRQ_GPIO(BUTTON_PIN_1), NULL);
+/*
 	remove_proc_entry("GAFR", proc_gpio_parent);
 	remove_proc_entry("GPDR", proc_gpio_parent);
 	remove_proc_entry("GPLR", proc_gpio_parent);
@@ -343,88 +403,87 @@ static void gpio_exit(void)
       remove_proc_entry( "gpio", NULL );
     }
   }
+*/
 
 }
 
 static void LED_helper(int num){
 
 	//use bitwise AND to check if the current bit should light the LED
+	printk(KERN_ALERT "%d\n", num);
 
 	//LSB LED 0
-	if(num & 1){
+	if(num & 0x1){
 		//set LED 0 to high
-		//pxa_gpio_set_value(LED_PIN_0, 1);
-		printk(KERN_ALERT, "LED 0 set high\n");
+		pxa_gpio_set_value(LED_PIN_0, 1);
 	}
 	else{
 		//set LED 0 to low
-		//pxa_gpio_set_value(LED_PIN_0, 0);
-		printk(KERN_ALERT, "LED 0 set low\n");
+		pxa_gpio_set_value(LED_PIN_0, 0);
 	}
 
 	//look at next bit
-	num>>1;
+	num = num >> 1;
 
 	//LED 1
-	if(num & 1){
+	if(num & 0x1){
 		//set LED 1 to high
-		//pxa_gpio_set_value(LED_PIN_1, 1);
-		printk(KERN_ALERT, "LED 1 set high\n");
+		pxa_gpio_set_value(LED_PIN_1, 1);
 	}
 	else{
 		//set LED 1 to low
-		//pxa_gpio_set_value(LED_PIN_1, 0);
-		printk(KERN_ALERT, "LED 1 set low\n");
+		pxa_gpio_set_value(LED_PIN_1, 0);
 	}
 
 	//look at next bit
-	num>>1;
+	num = num >> 1;
 
 	//LED 2
-	if(num & 1){
+	if(num & 0x1){
 		//set LED 2 to high
-		//pxa_gpio_set_value(LED_PIN_2, 1);
-		printk(KERN_ALERT, "LED 2 set high\n");
+		pxa_gpio_set_value(LED_PIN_2, 1);
 	}
 	else{
 		//set LED 2 to low
-		//pxa_gpio_set_value(LED_PIN_2, 0);
-		printk(KERN_ALERT, "LED 2 set low\n");
+		pxa_gpio_set_value(LED_PIN_2, 0);
 	}
 
 	//look at next bit
-	num>>1;
+	num = num >> 1;
 
 	//MSB LED 3
-	if(num & 1){
+	if(num & 0x1){
 		//set LED 3 to high
-		//pxa_gpio_set_value(LED_PIN_3, 1);
-		printk(KERN_ALERT, "LED 3 set high\n");
+		pxa_gpio_set_value(LED_PIN_3, 1);
 	}
 	else{
 		//set LED 3 to low
-		//pxa_gpio_set_value(LED_PIN_3, 0);
-		printk(KERN_ALERT, "LED 3 set low\n");
+		pxa_gpio_set_value(LED_PIN_3, 0);
 	}
 
 }
 
 static irq_handler_t button0_interrupt(unsigned int irq, void *dev_id, struct pt_regs *regs){
 	//button 0: released holds value, pressed counts by 1
-	//state = pxa_gpio_get_value(BUTTON_PIN_0);
+	printk(KERN_ALERT "State Interrupt\n");	
+	state = !state;
+	return IRQ_HANDLED;
 	
 
 }
 
-static irq_handler_t button0_interrupt(unsigned int irq, void *dev_id, struct pt_regs *regs){
+static irq_handler_t button1_interrupt(unsigned int irq, void *dev_id, struct pt_regs *regs){
 	//button 1: released sets count direction to down, pressed sets count direction to up
-	//direction = pxa_gpio_get_value(BUTTON_PIN_1);
+	printk(KERN_ALERT "Direction Interrupt\n");	
+	direction = !direction;
+	return IRQ_HANDLED;
 
 }
 
 static void timer_handler(unsigned long data) {
 
 	//check if we need to update counter value
+	printk(KERN_ALERT "In Timer handler\n");
 	if(state){
 
 		//check counter direction
@@ -438,10 +497,16 @@ static void timer_handler(unsigned long data) {
 	}
 
 	//Update LEDs
+	counter = counter % 16;
+	if(counter == 0 && direction == 1)
+		counter = 1;
+	else if(counter == 0 && direction == 0)
+		counter = 15;
 	LED_helper(counter);
 
 	//modify timer to frequency * seconds
-	//mod_timer(my_timer, jiffies + (frequency * HZ));
+	mod_timer(my_timer_ptr, jiffies + msecs_to_jiffies(frequency * 1000));
+	return;
  
 }
 
