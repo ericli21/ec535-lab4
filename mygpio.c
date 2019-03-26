@@ -12,18 +12,19 @@
 #include <asm/arch/gpio.h>
 #include <linux/timer.h> //need for kernel timer
 
+//Function declarations
 static void LED_helper(int num);
 static irq_handler_t button0_interrupt(unsigned int irq, void *dev_id, struct pt_regs *regs);
 static irq_handler_t button1_interrupt(unsigned int irq, void *dev_id, struct pt_regs *regs);
 static void timer_handler(unsigned long data);
 
-//initial count is 1, direction is 0 (down), state is 0 (hold value)
+//initial count is 1, direction is 0 (subtract), state is 0 (hold value)
 static int counter = 1;
-static int direction = 1;
+static int direction = 0;
 static int state = 0;
 
-//initial timer frequency is 1HZ (1 second), can be fractional
-static int frequency = 1;
+//initial timer frequency is 1HZ (1 second, 4*250ms), can be fractional
+static int frequency = 4;
 static struct timer_list * my_timer_ptr;
 static struct timer_list my_timer;
 
@@ -36,254 +37,108 @@ static struct timer_list my_timer;
 #define BUTTON_PIN_0 17
 #define BUTTON_PIN_1 101
 
-static struct proc_dir_entry *proc_gpio_parent;
-static struct proc_dir_entry *proc_gpios[PXA_LAST_GPIO + 1];
+//function declarations
+static ssize_t gpio_read(struct file * filp, char * buff, size_t count, loff_t * f_pos);
+static ssize_t gpio_write(struct file * filp, char * buff, size_t count, loff_t * f_pos);
+static int gpio_open(struct inode * inode, struct file * filp);
+static int gpio_release(struct inode * inode, struct file * filp);
+static void gpio_exit(void);
+static int __init gpio_init(void);
 
-typedef struct
+//struct for read and write
+struct file_operations my_gpio_fops = {
+	read: gpio_read,
+	write: gpio_write,
+	open: gpio_open,
+	release: gpio_release
+};
+
+static int my_gpio_major = 61;
+
+module_init(gpio_init);
+module_exit(gpio_exit);
+MODULE_LICENSE("Dual BSD/GPL");
+
+static ssize_t gpio_write(struct file * filp, char * buff, size_t count, loff_t * f_pos)
 {
-	int	gpio;
-	char    name[32];
-} gpio_summary_type;
-
-static gpio_summary_type gpio_summaries[PXA_LAST_GPIO + 1];
-
-static int proc_gpio_write(struct file *file, const char __user *buf,
-                           unsigned long count, void *data)
-{
-
 	//extra functionality: writing f(1-9) changes timer frequency to n/4
 	//extra functionality: writing v(hex) sets count value to given hex value
 
-	//add checks for null input after an f or a v 
+	char input[count + 1];
 
-	//if count > 1
-
-	//if buffer[0] == f
-		//number = atoi(buffer[1])
-		//if number < 10 && number >= 1
-			//frequency = number/4.0;
-
-	//if buffer[0] == v
-		//get next char
-		//A is 65, F is 70 in ASCII
-		//if(buffer[1] >= '0' && buffer[1] <= '9' && (buffer[2] is NULL or a newline))
-			//counter = atoi(buffer[1]);
-		//else if(buffer[1] >= 'A' && buffer[1] <= 'F' && (buffer[2] is NULL or a newline))
-			//counter = atoi(buffer[1] - 55);
-
-	//We probably don't need anything beyond this point
-/*
-
-	char *cur, lbuf[count + 1];
-	gpio_summary_type *summary = data;
-	u32 altfn, direction, setclear, gafr;
-
-	if (!capable(CAP_SYS_ADMIN))
-		return -EACCES;
-
-	memset(lbuf, 0, count + 1);
-
-	if (copy_from_user(lbuf, buf, count))
+	if (copy_from_user(input, buff, count))
 		return -EFAULT;
 
-	cur = lbuf;
-
-	// Initialize to current state
-	altfn = ((GAFR(summary->gpio) >> ((summary->gpio & 0x0f) << 0x01)) & 0x03);
-	direction = GPDR(summary->gpio) & GPIO_bit(summary->gpio);
-	setclear = GPLR(summary->gpio) & GPIO_bit(summary->gpio);
-	while(1)
-	{
-		// We accept options: {GPIO|AF1|AF2|AF3}, {set|clear}, {in|out}
-		// Anything else is an error
-		while(cur[0] && (isspace(cur[0]) || ispunct(cur[0]))) cur = &(cur[1]);
-
-		if('\0' == cur[0]) break;
-
-		// Ok, so now we're pointing at the start of something
-		switch(cur[0])
-		{
-			case 'G':
-				// Check that next is "PIO" -- '\0' will cause safe short-circuit if end of buf
-				if(!(cur[1] == 'P' && cur[2] == 'I' && cur[3] == 'O')) goto parse_error;
-				// Ok, so set this GPIO to GPIO (non-ALT) function
-				altfn = 0;
-				cur = &(cur[4]);
-				break;
-			case 'A':
-				if(!(cur[1] == 'F' && cur[2] >= '1' && cur[2] <= '3')) goto parse_error;
-				altfn = cur[2] - '0';
-				cur = &(cur[3]);
-				break;
-			case 's':
-				if(!(cur[1] == 'e' && cur[2] == 't')) goto parse_error;
-				setclear = 1;
-				cur = &(cur[3]);
-				break;
-			case 'c':
-				if(!(cur[1] == 'l' && cur[2] == 'e' && cur[3] == 'a' && cur[4] == 'r')) goto parse_error;
-				setclear = 0;
-				cur = &(cur[5]);
-				break;
-			case 'i':
-				if(!(cur[1] == 'n')) goto parse_error;
-				direction = 0;
-				cur = &(cur[2]);
-				break;
-			case 'o':
-				if(!(cur[1] == 'u' && cur[2] == 't')) goto parse_error;
-				direction = 1;
-				cur = &(cur[3]);
-				break;
-			default: goto parse_error;
+	//Check if valid input
+	if(sizeof(input) == 4){
+		if(input[0] == 'v'){
+			if(input[1] >= 'A' && input[1] <= 'F'){
+				counter = input[1] - 55;
+			}
+			else if(input[1] >= 'a' && input[1] <= 'f'){
+				counter = input[1] - 87;
+			}
+			else if(input[1] >= '1' && input[1] <= '9'){
+				counter = input[1] - '0';
+			}
+			else{
+				printk(KERN_INFO "Invalid input format\n");
+			}
+		}
+		else if(input[0] == 'f'){
+			if(input[1] >= '1' && input[1] <= '9'){
+				frequency = input[1] - '0';
+			}
+			else{
+				printk(KERN_INFO "Invalid input format\n");
+			}
+		}
+		else{
+			printk(KERN_INFO "Invalid input format\n");
 		}
 	}
-	// Ok, now set gpio mode and value
-	if(direction)
-		GPDR(summary->gpio) |= GPIO_bit(summary->gpio);
-	else
-		GPDR(summary->gpio) &= ~GPIO_bit(summary->gpio);
-
-	gafr = GAFR(summary->gpio) & ~(0x3 << (((summary->gpio) & 0xf)*2));
-	GAFR(summary->gpio) = gafr |  (altfn  << (((summary->gpio) & 0xf)*2));
-
-	if(direction && !altfn)
-	{
-		if(setclear) GPSR(summary->gpio) = GPIO_bit(summary->gpio);
-		else GPCR(summary->gpio) = GPIO_bit(summary->gpio);
+	else{
+		printk(KERN_INFO "Invalid input format\n");
 	}
 
-#ifdef CONFIG_PROC_GPIO_DEBUG
-	printk(KERN_INFO "Set (%s,%s,%s) via /proc/gpio/%s\n",altfn ? (altfn == 1 ? "AF1" : (altfn == 2 ? "AF2" : "AF3")) : "GPIO",
-				direction ? "out" : "in",
-				setclear ? "set" : "clear",
-				summary->name);
-#endif
-*/
 	return count;
-
-parse_error:
-	printk(KERN_CRIT "Parse error: Expect \"[GPIO|AF1|AF2|AF3]|[set|clear]|[in|out] ...\"\n");
-	return -EINVAL;
 }
 
-static int proc_gpio_read(char *page, char **start, off_t off,
-			int count, int *eof, void *data)
+static ssize_t gpio_read(struct file * filp, char * buff, size_t count, loff_t * f_pos)
 {
 
 	//extra functionality: reading from /dev/mygpio returns:
 	//counter value, counter frequency, counter direction, counter state
-	//int len = sprintf(page,"%d\t%.3f\t%d\t%d\n", counter, frequency, direction, state);
+	char * page;
+	int len = sprintf(page,"Count: %d\tFrequency: %d/4\tDirection: %d\tState: %d\n", counter, frequency, direction, state);
 
-	int len;
-
-	/*
-	char *p = page;
-	gpio_summary_type *summary = data;
-	int len, i, af;
-	i = summary->gpio;
-
-	p += sprintf(p, "%d\t%s\t%s\t%s\n", i,
-			(af = ((GAFR(i) >> ((i & 0x0f) << 0x01)) & 0x03)) ? (af == 1 ? "AF1" : (af == 2 ? "AF2" : "AF3")) : "GPIO",
-			(GPDR(i) & GPIO_bit(i)) ? "out" : "in",
-			(GPLR(i) & GPIO_bit(i)) ? "set" : "clear");
-
-	len = (p - page) - off;
-
-	if(len < 0)
-	{
-		len = 0;
+	if(*f_pos >= sizeof(page)){
+		return 0;
 	}
 
-	*eof = (len <= count) ? 1 : 0;
-	*start = page + off;
-	*/
-	return len;
-}
-/*
-//We probably don't need these other read functions
-
-#ifdef CONFIG_PXA25x
-static const char const *GAFR_DESC[] = { "GAFR0_L", "GAFR0_U", "GAFR1_L", "GAFR1_U", "GAFR2_L", "GAFR2_U" };
-#elif defined(CONFIG_PXA27x)
-static const char const *GAFR_DESC[] = { "GAFR0_L", "GAFR0_U", "GAFR1_L", "GAFR1_U", "GAFR2_L", "GAFR2_U", "GAFR3_L", "GAFR3_U" };
-#endif
-
-static int proc_gafr_read(char *page, char **start, off_t off,
-			int count, int *eof, void *data)
-{
-	char *p = page;
-	int i, len;
-
-	for(i=0; i<ARRAY_SIZE(GAFR_DESC); i++)
-	{
-		p += sprintf(p, "%s: %08x\n", GAFR_DESC[i], GAFR(i*16));
+	if(copy_to_user(buff, page, sizeof(page))){		
+		return -EFAULT;
 	}
 
-	len = (p - page) - off;
-
-	if(len < 0)
-	{
-		len = 0;
-	}
-
-	*eof = (len <= count) ? 1 : 0;
-	*start = page + off;
-
-	return len;
+	*f_pos += count;
+	return count;
 }
 
-static int proc_gpdr_read(char *page, char **start, off_t off,
-			int count, int *eof, void *data)
-{
-	char *p = page;
-	int i, len;
-
-	for(i=0; i<=2; i++)
-	{
-		p += sprintf(p, "GPDR%d: %08x\n", i, GPDR(i * 32));
-	}
-
-	len = (p - page) - off;
-
-	if(len < 0)
-	{
-		len = 0;
-	}
-
-	*eof = (len <= count) ? 1 : 0;
-	*start = page + off;
-
-	return len;
+static int gpio_open(struct inode * inode, struct file * filp){	
+	return 0;
 }
 
-static int proc_gplr_read(char *page, char **start, off_t off,
-			int count, int *eof, void *data)
-{
-	char *p = page;
-	int i, len;
-
-	for(i=0; i<=2; i++)
-	{
-		p += sprintf(p, "GPLR%d: %08x\n", i, GPLR(i * 32));
-	}
-
-	len = (p - page) - off;
-
-	if(len < 0)
-	{
-		len = 0;
-	}
-
-	*eof = (len <= count) ? 1 : 0;
-	*start = page + off;
-
-	return len;
+static int gpio_release(struct inode * inode, struct file * filp){
+	return 0;
 }
-*/
+
 static int __init gpio_init(void)
 {
-	int i;
+	int result;
+	result = register_chrdev(my_gpio_major, "mygpio", &my_gpio_fops);
+	if(result < 0){
+		return result;
+	}
 
   	//initialize LED pins here, set as output
 	int led0 = pxa_gpio_mode(LED_PIN_0 | GPIO_OUT);
@@ -291,127 +146,56 @@ static int __init gpio_init(void)
 	int led2 = pxa_gpio_mode(LED_PIN_2 | GPIO_OUT);
 	int led3 = pxa_gpio_mode(LED_PIN_3 | GPIO_OUT);
 
+	//Clear LEDs
 	pxa_gpio_set_value(LED_PIN_0, 0);
 	pxa_gpio_set_value(LED_PIN_1, 0);
 	pxa_gpio_set_value(LED_PIN_2, 0);
 	pxa_gpio_set_value(LED_PIN_3, 0);
 
-	//set up buttons as input
+	//Initialize buttons as input
 	pxa_gpio_mode(BUTTON_PIN_0 | GPIO_IN);
 	pxa_gpio_mode(BUTTON_PIN_1 | GPIO_IN);
 
+	//Set up interrupts, need both rising and falling edge interrupt conditions
 	int irq0 = IRQ_GPIO(BUTTON_PIN_0);
 	int irq1 = IRQ_GPIO(BUTTON_PIN_1);
 
-
-	//Set up interrupt
 	if (request_irq(irq0, &button0_interrupt, SA_INTERRUPT | SA_TRIGGER_RISING | SA_TRIGGER_FALLING,
 				"mygpio", NULL) != 0 ) {
-                printk ( "irq not acquired \n" );
+                printk(KERN_ALERT "IRQ not acquired \n" );
                 return -1;
-        }else{
-                printk ( "irq %d acquired successfully \n", irq0 );
-	}
-
+        }
 	if (request_irq(irq1, &button1_interrupt, SA_INTERRUPT | SA_TRIGGER_RISING | SA_TRIGGER_FALLING,
 				"mygpio", NULL) != 0 ) {
-                printk ( "irq not acquired \n" );
+                printk(KERN_ALERT "IRQ not acquired \n" );
                 return -1;
-        }else{
-                printk ( "irq %d acquired successfully \n", irq1 );
-	}
+        }
 
   	//Set up timer
 	my_timer_ptr = &my_timer;
-	//printk(KERN_ALERT "Made it\n");
 	init_timer(my_timer_ptr);
-	//printk(KERN_ALERT "Made it\n");
-	(*my_timer_ptr).expires = jiffies + msecs_to_jiffies(frequency * 1000);
-	//printk(KERN_ALERT "Made it\n");
+	(*my_timer_ptr).expires = jiffies + msecs_to_jiffies(frequency * 250);
 	(*my_timer_ptr).function = timer_handler;
-
 	add_timer(my_timer_ptr);
 
-
+	//Call LED helper to set counter
 	LED_helper(counter);
 
-
-  	//Probably don't need anything beyond this point, all proc setup
-
-
-
-/*
-  proc_gpio_parent = NULL;
-  for (proc_gpio_parent = proc_root.subdir; proc_gpio_parent; proc_gpio_parent = proc_gpio_parent->next) {
-    if (( proc_gpio_parent->namelen == 4 ) && ( memcmp(proc_gpio_parent->name, "gpio", 4 ) == 0 ))
-      break;
-  }
-
-  // proc_gpio_parent will be non-NULL if the directory already exists
-
-  if (!proc_gpio_parent) {
-       proc_gpio_parent = proc_gpio_parent = create_proc_entry("gpio", S_IFDIR | S_IRUGO | S_IXUGO, NULL);
-  }
-
- 	if(!proc_gpio_parent) return 0;
-
-	for(i=0; i < (PXA_LAST_GPIO+1); i++)
-	{
-		gpio_summaries[i].gpio = i;
-		sprintf(gpio_summaries[i].name, "GPIO%d", i);
-		proc_gpios[i] = create_proc_entry(gpio_summaries[i].name, 0644, proc_gpio_parent);
-		if(proc_gpios[i])
-		{
-			proc_gpios[i]->data = &gpio_summaries[i];
-			proc_gpios[i]->read_proc = proc_gpio_read;
-			proc_gpios[i]->write_proc = proc_gpio_write;
-		}
-	}
-
-	create_proc_read_entry("GAFR", 0444, proc_gpio_parent, proc_gafr_read, NULL);
-	create_proc_read_entry("GPDR", 0444, proc_gpio_parent, proc_gpdr_read, NULL);
-	create_proc_read_entry("GPLR", 0444, proc_gpio_parent, proc_gplr_read, NULL);
-*/
 	return 0;
 }
 
 static void gpio_exit(void)
 {
-	//delete timer if there is one
-	//Probably don't need the rest of this because it's all proc cleanup
-
-
-	int i;
+	//Clean up timer and IRQs
+	unregister_chrdev(my_gpio_major, "mygpio");
 	del_timer(my_timer_ptr);
 	free_irq(IRQ_GPIO(BUTTON_PIN_0), NULL);
 	free_irq(IRQ_GPIO(BUTTON_PIN_1), NULL);
-/*
-	remove_proc_entry("GAFR", proc_gpio_parent);
-	remove_proc_entry("GPDR", proc_gpio_parent);
-	remove_proc_entry("GPLR", proc_gpio_parent);
-
-	for(i=0; i < (PXA_LAST_GPIO+1); i++)
-	{
-		if(proc_gpios[i]) remove_proc_entry(gpio_summaries[i].name, proc_gpio_parent);
-	}
-
-  if (proc_gpio_parent)
-  {
-    if (!proc_gpio_parent->subdir)
-    {
-      // Only remove /proc/gpio if it's empty.
-      remove_proc_entry( "gpio", NULL );
-    }
-  }
-*/
-
 }
 
 static void LED_helper(int num){
 
 	//use bitwise AND to check if the current bit should light the LED
-	printk(KERN_ALERT "%d\n", num);
-
 	//LSB LED 0
 	if(num & 0x1){
 		//set LED 0 to high
@@ -465,7 +249,7 @@ static void LED_helper(int num){
 
 static irq_handler_t button0_interrupt(unsigned int irq, void *dev_id, struct pt_regs *regs){
 	//button 0: released holds value, pressed counts by 1
-	printk(KERN_ALERT "State Interrupt\n");	
+	//printk(KERN_ALERT "State Interrupt\n");	
 	state = !state;
 	return IRQ_HANDLED;
 	
@@ -474,7 +258,7 @@ static irq_handler_t button0_interrupt(unsigned int irq, void *dev_id, struct pt
 
 static irq_handler_t button1_interrupt(unsigned int irq, void *dev_id, struct pt_regs *regs){
 	//button 1: released sets count direction to down, pressed sets count direction to up
-	printk(KERN_ALERT "Direction Interrupt\n");	
+	//printk(KERN_ALERT "Direction Interrupt\n");	
 	direction = !direction;
 	return IRQ_HANDLED;
 
@@ -482,8 +266,7 @@ static irq_handler_t button1_interrupt(unsigned int irq, void *dev_id, struct pt
 
 static void timer_handler(unsigned long data) {
 
-	//check if we need to update counter value
-	printk(KERN_ALERT "In Timer handler\n");
+	//Check if we need to update counter value
 	if(state){
 
 		//check counter direction
@@ -496,7 +279,7 @@ static void timer_handler(unsigned long data) {
 
 	}
 
-	//Update LEDs
+	//Update LEDs, if statements to have number wrap around
 	counter = counter % 16;
 	if(counter == 0 && direction == 1)
 		counter = 1;
@@ -504,12 +287,8 @@ static void timer_handler(unsigned long data) {
 		counter = 15;
 	LED_helper(counter);
 
-	//modify timer to frequency * seconds
-	mod_timer(my_timer_ptr, jiffies + msecs_to_jiffies(frequency * 1000));
+	//Reset timer
+	mod_timer(my_timer_ptr, jiffies + msecs_to_jiffies(frequency * 250));
 	return;
  
 }
-
-module_init(gpio_init);
-module_exit(gpio_exit);
-MODULE_LICENSE("GPL");
